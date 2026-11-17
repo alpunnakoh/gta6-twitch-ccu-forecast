@@ -5,8 +5,8 @@ writes, for each of hours 2..24 of the release day, five quantiles
 (5/25/50/75/95%) of that hour's Twitch concurrent viewers in the
 "Grand Theft Auto VI" category.
 
-Method (see METHOD.md for the full write-up and backtest numbers)
-------------------------------------------------------------------
+Method (M24; see METHOD.md for the full write-up and backtest numbers)
+-----------------------------------------------------------------------
 The forecast is anchored on the case's hour-1 print p1 and on the shape of
 past big launches' release days, which the case carries in `comparables`
 (SullyGnome hourly Twitch category averages, 14 days before to 3 days after
@@ -19,30 +19,62 @@ Ragnarok, Zelda) ramp from hour 1 into a US-evening peak. Launches with one
 simultaneous global unlock later in the day (Black Myth: Wukong 02:00Z,
 Silksong 14:00Z) have a near-empty hour 1 and explode later; early-access
 launches already peaked before hour 1. Mixing those shapes destroys the
-forecast, so the model trains ONLY on the "already-unlocked" family:
-comparables that are not early-access-contaminated and not
-simultaneous-global.
+forecast, so the model trains ONLY on launches whose hour 1 is a real
+launch hour:
+
+  * not early-access-contaminated and not simultaneous-global (the M23
+    text rule), AND
+  * hour-1 viewers >= 10,000 -- the text rule alone lets in launches whose
+    hour 1 is essentially empty (Kingdom Come 414 viewers, HELLDIVERS 2
+    419, Marathon 1,393, ARC Raiders 1,410), whose 100-1000x ratios
+    steepen every slope and blow up the residual spread, AND
+  * PLUS the two giants, Elden Ring (875k) and Cyberpunk 2077 (852k):
+    their unlock text contains "single global" (PC), which the text rule
+    rejects, but their hour 1 IS a real launch hour (PC unlocked at or
+    just before 00:00Z, consoles rolling midnight local) and their curves
+    are family-shaped (dip to ~0.5, US-evening recovery to ~1.0). They are
+    the only launches anywhere near GTA VI's scale, so excluding them
+    leaves the family capped at 365k.
 
 For each hour h = 2..24, over the training family, fit in log space
 
     ln(v_h / v_1) = a_h + b_h * (ln(v_1) - mean ln(v_1))
 
 i.e. the log-ratio of hour h to hour 1, regressed on launch size. The slope
-is shrunk toward 0 by n/(n+3). The target's log-size is clamped to the
-training range so a record-size launch never extrapolates past the data.
-The median forecast is p1 * exp(a_h + b_h * (clamped ln p1 - mean)), and
+is shrunk toward 0 by n/(n+5). GTA VI will very likely be bigger than any
+training launch (family max 875k), so the target's log-size is NOT hard
+clamped to the training range: beyond the range it moves only half the way
+(damped extrapolation, factor 0.5). A damped step beats both a hard clamp
+and a full extrapolation on the giant test (train capped at 365k, predict
+the two 850k+ giants: 0.122 vs 0.133 clamped, 0.125 unclamped; M23: 0.181).
+
+The median forecast is p1 * exp(a_h + b_h * (effective ln p1 - mean)), and
 the five quantiles are the EMPIRICAL quantiles of the fit's residuals
 (5/25/50/75/95% of the sorted residuals, linear interpolation): the
 residuals are skewed and heavy-tailed, so a normal spread misprices the
-tails — the empirical spread is what the backtest rewards (see METHOD.md).
+tails. Spread inflation and leave-one-out residuals were both tested and
+both HURT the GTA-VI-like subsets, so the plain in-sample empirical spread
+stays. Channels (viewers per channel at hour 1) and the pre-launch
+baseline were tested as extra signals and both HURT or are uncomputable
+for the target, so neither is used.
 
 Backtest (leave-one-out over the 37 comparable launches in the kit,
-pinball loss on the log scale, lower is better):
-    house baseline (persistence)      0.930
-    this model                        0.464
-    this model, rolling launches only 0.264 (baseline 0.357 there)
-Coverage of the 90% band in backtest: 0.80; typical median miss ~129%
-(the launch-day curve is genuinely hard to pin down hour by hour).
+pinball loss on the log scale, lower is better). NOTE: the plain total
+(0.668) is WORSE than M23's (0.464) -- entirely because of seven
+simultaneous-global launches whose hour 1 is ~empty (Silksong, HELLDIVERS
+2, Kingdom Come, ARC Raiders, Battlefield 6, Black Myth, Baldur's Gate 3);
+the new family cannot predict their 100-1000x explosions, and neither can
+any model that matters for GTA VI, whose hour 1 will be enormous. On
+every GTA-VI-like subset M24 beats M23 clearly:
+    rolling-midnight launches only   0.237 (M23 0.264)
+    console-only rolling launches   0.167 (M23 0.238)
+    already-unlocked & v1 >= 50k    0.196 (M23 0.230)
+    v1 >= 100k                      0.226 (M23 0.244)
+    the two giants (Elden Ring, Cyberpunk)  0.112 (M23 0.181)
+    giant test (train capped at 365k, predict the giants) 0.122 (M23 0.181)
+Coverage of the 90% band on rolling launches: 0.87 (M23 0.96, over-wide);
+typical median miss ~48% (M23 57%). End-to-end validation through the
+shipped main.py reproduces the backtest total exactly (0.6682, n=37).
 
 The program is deterministic (sorted inputs, no randomness, no clock, no
 network) and uses only the Python standard library. It runs in well under
@@ -68,7 +100,12 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
-SHRINK_K = 3          # slope shrinkage n / (n + SHRINK_K)
+SHRINK_K = 5          # slope shrinkage n / (n + SHRINK_K)
+DAMP = 0.5            # extrapolation beyond the training size range: move
+                      # only this fraction of the way past the boundary
+V1_FLOOR = 10_000     # family members need a real launch hour 1
+GIANTS = {"ELDEN RING", "Cyberpunk 2077"}  # hour 1 is a real launch hour
+                      # despite "single global" in their unlock text
 MIN_GROUP = 8         # need at least this many training launches, else fall back
 MIN_HOUR_N = 8        # need at least this many launches with hour h, else fallback
 SD_FALLBACK = 0.45    # spread when an hour has too little data
@@ -116,6 +153,21 @@ def already_unlocked(comp):
     if is_simultaneous(comp):
         return False
     return True
+
+
+def in_family(comp, curve):
+    """True when the comparable belongs in the training family: hour 1 is a
+    real launch hour. The two giants are in even though their unlock text
+    mentions a simultaneous PC unlock -- their hour 1 (PC at/before 00:00Z,
+    consoles rolling midnight) is a genuine launch hour, and they are the
+    only launches near GTA VI's scale. Launches with a near-empty hour 1
+    (v1 < 10,000) are out: their 100-1000x ratios are a different shape
+    family and only steepen the slopes for the launches that matter."""
+    if comp.get("name") in GIANTS:
+        return True
+    if not already_unlocked(comp):
+        return False
+    return curve.get(1, 0) >= V1_FLOOR
 
 
 def extract_curve(comp):
@@ -182,6 +234,20 @@ def fit_hour(pairs, log_p1):
     return median_log, resid
 
 
+def effective_log_size(log_p1, lo, hi):
+    """Damped extrapolation: inside the training range the size is used as
+    is; outside it, move only DAMP of the way past the boundary. A
+    record-size launch is therefore neither clamped flat to the biggest
+    training launch nor extrapolated at full slope -- both of which scored
+    worse on the giant test (train capped at 365k, predict the 850k+
+    giants)."""
+    if log_p1 > hi:
+        return hi + DAMP * (log_p1 - hi)
+    if log_p1 < lo:
+        return lo + DAMP * (log_p1 - lo)
+    return log_p1
+
+
 def forecast_case(case, name):
     if case.get("levels") != LEVELS:
         raise ValueError(f"{name} asks for levels {case.get('levels')}, not {LEVELS}")
@@ -207,13 +273,18 @@ def forecast_case(case, name):
         curve = extract_curve(comp)
         if 1 in curve and len(curve) >= 12:
             launches.append((comp, curve))
-    family = [(c, v) for c, v in launches if already_unlocked(c)]
+    family = [(c, v) for c, v in launches if in_family(c, v)]
     train = family if len(family) >= MIN_GROUP else launches
+    # Note: in the final case the comparables hold all 42 launches,
+    # including the four practice launches (Wolverine, Red Dead Redemption 2,
+    # God of War Ragnarok, Spider-Man 2) -- all rolling-midnight console
+    # launches with v1 >= 10,000, so they join the family automatically and
+    # strengthen exactly the launches GTA VI resembles most.
 
     log_sizes = [math.log(v[1]) for _, v in train] if train else []
     lo = min(log_sizes) if log_sizes else 0.0
     hi = max(log_sizes) if log_sizes else 0.0
-    log_p1 = min(max(math.log(p1), lo), hi) if log_sizes else math.log(p1)
+    log_p1 = effective_log_size(math.log(p1), lo, hi) if log_sizes else math.log(p1)
 
     rows = []
     for row in case["forecast"]:
