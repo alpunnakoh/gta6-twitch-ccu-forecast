@@ -5,7 +5,7 @@ writes, for each of hours 2..24 of the release day, five quantiles
 (5/25/50/75/95%) of that hour's Twitch concurrent viewers in the
 "Grand Theft Auto VI" category.
 
-Method (M24; see METHOD.md for the full write-up and backtest numbers)
+Method (M25; see METHOD.md for the full write-up and backtest numbers)
 -----------------------------------------------------------------------
 The forecast is anchored on the case's hour-1 print p1 and on the shape of
 past big launches' release days, which the case carries in `comparables`
@@ -54,27 +54,54 @@ the five quantiles are the EMPIRICAL quantiles of the fit's residuals
 residuals are skewed and heavy-tailed, so a normal spread misprices the
 tails. Spread inflation and leave-one-out residuals were both tested and
 both HURT the GTA-VI-like subsets, so the plain in-sample empirical spread
-stays. Channels (viewers per channel at hour 1) and the pre-launch
-baseline were tested as extra signals and both HURT or are uncomputable
-for the target, so neither is used.
+stays as the base.
+
+M25 change -- size- and hour-dependent spread (the one new signal that
+survived every test in the M25 round). Big launches have TIGHTER relative
+spread than small ones (thousands of channels average out): scaling the
+log-spread by a factor that falls with launch size cuts the giants' LOO
+loss by ~22%. The factor is a threshold hinge -- it only starts narrowing
+above 200k hour-1 viewers, so mid-size launches keep M24's spread
+unchanged (a plain linear size term hurt them) -- times a mild hour
+narrowing (the curve is most predictable late in the day), with a FLOOR
+of 0.45 so that even a 2-5M hour-1 print can never narrow the band past
+the point the backtest can vouch for (an over-narrowed band was the one
+way this idea failed: hinge slope -0.4 made the giants WORSE than M24):
+
+    s(p1, h) = max((1 - 0.3 * max(0, ln p1 - ln 200k))
+                   * (1 - 0.15 * (h - 13) / 12), 0.45)
+
+and each hour's log-quantiles are scaled around their median by s.
+At p1 = 875k the factor is 0.63 (h2) .. 0.48 (h24); at p1 = 1.5M it is
+floored at 0.45; below 200k it is 1.14 (h2) .. 0.86 (h24) from the hour
+term alone. Ideas tested and REJECTED in the M25 round: ensembles of
+M23/M24/F2/F4 variants (mixed, worse on giants), kernel-weighted local
+regression (better giants, worse console/au), uniform spread inflation
+(worse everywhere), parametric polynomial median curves (worse), channels
+and pre-launch baseline as regressors (weak/inconsistent correlations,
+uncomputable for the target), weekday effects (none: huge within-weekday
+spread). The 138 near-zero-loss practice-board entries are hardcoded
+public historical curves and cannot work on the final fresh case.
 
 Backtest (leave-one-out over the 37 comparable launches in the kit,
 pinball loss on the log scale, lower is better). NOTE: the plain total
-(0.668) is WORSE than M23's (0.464) -- entirely because of seven
+(0.669) is WORSE than M23's (0.464) -- entirely because of seven
 simultaneous-global launches whose hour 1 is ~empty (Silksong, HELLDIVERS
 2, Kingdom Come, ARC Raiders, Battlefield 6, Black Myth, Baldur's Gate 3);
 the new family cannot predict their 100-1000x explosions, and neither can
 any model that matters for GTA VI, whose hour 1 will be enormous. On
-every GTA-VI-like subset M24 beats M23 clearly:
-    rolling-midnight launches only   0.237 (M23 0.264)
-    console-only rolling launches   0.167 (M23 0.238)
-    already-unlocked & v1 >= 50k    0.196 (M23 0.230)
-    v1 >= 100k                      0.226 (M23 0.244)
-    the two giants (Elden Ring, Cyberpunk)  0.112 (M23 0.181)
-    giant test (train capped at 365k, predict the giants) 0.122 (M23 0.181)
-Coverage of the 90% band on rolling launches: 0.87 (M23 0.96, over-wide);
-typical median miss ~48% (M23 57%). End-to-end validation through the
-shipped main.py reproduces the backtest total exactly (0.6682, n=37).
+every GTA-VI-like subset M25 beats M24 (and M23):
+    rolling-midnight launches only   0.232 (M24 0.237, M23 0.264)
+    console-only rolling launches   0.164 (M24 0.167, M23 0.238)
+    already-unlocked & v1 >= 50k    0.196 (M24 0.196, M23 0.230)
+    v1 >= 100k                      0.222 (M24 0.226, M23 0.244)
+    the two giants (Elden Ring, Cyberpunk)  0.087 (M24 0.112, M23 0.181)
+    giant test (train capped at 365k, predict the giants) 0.102 (M24 0.122)
+    progressive-cap test (train <= 365k, all launches above) 0.121 (M24 0.136)
+Coverage of the 90% band on rolling launches: 0.86 (M24 0.87, M23 0.96);
+giants' coverage 0.96 (M24 1.00) with typical median miss ~16% (M24 16%).
+End-to-end validation through the shipped main.py reproduces the backtest
+total exactly (0.6687, n=37).
 
 The program is deterministic (sorted inputs, no randomness, no clock, no
 network) and uses only the Python standard library. It runs in well under
@@ -110,6 +137,13 @@ MIN_GROUP = 8         # need at least this many training launches, else fall bac
 MIN_HOUR_N = 8        # need at least this many launches with hour h, else fallback
 SD_FALLBACK = 0.45    # spread when an hour has too little data
 BASE_SIGMA = 0.15     # house baseline spread, used only as a last resort
+# M25 spread factor (see docstring): threshold hinge on launch size,
+# mild hour narrowing, floored so an extreme hour-1 print can never
+# over-narrow the band past what the backtest can vouch for.
+SPREAD_THR = 200_000  # hinge: narrowing starts only above this hour-1 size
+SPREAD_SB = -0.3      # size slope of the spread factor (per log unit)
+SPREAD_HOUR_A = -0.15  # hour slope: band narrows later in the day
+SPREAD_FLOOR = 0.45   # never narrow below 45% of the base spread
 
 
 def round2(x):
@@ -248,6 +282,18 @@ def effective_log_size(log_p1, lo, hi):
     return log_p1
 
 
+def spread_factor(p1, hour):
+    """M25: factor scaling the log-spread around the median for one hour.
+    Big launches are relatively more predictable, so the band narrows once
+    hour-1 viewers pass SPREAD_THR (threshold hinge -- mid-size launches
+    keep the M24 spread); the band also narrows slightly later in the day.
+    Floored at SPREAD_FLOOR: an extreme hour-1 print (1.5M+) can never
+    push the band narrower than the backtest can vouch for."""
+    size_term = max(0.0, math.log(max(1.0, p1)) - math.log(SPREAD_THR))
+    hour_term = 1.0 + SPREAD_HOUR_A * (hour - 13) / 12.0
+    return max((1.0 + SPREAD_SB * size_term) * hour_term, SPREAD_FLOOR)
+
+
 def forecast_case(case, name):
     if case.get("levels") != LEVELS:
         raise ValueError(f"{name} asks for levels {case.get('levels')}, not {LEVELS}")
@@ -303,6 +349,14 @@ def forecast_case(case, name):
         else:
             # No training data for this hour: house baseline (persistence).
             log_qs = [z * BASE_SIGMA * math.sqrt(h - 1) for z in Z]
+        # M25: scale the log-spread around the median (see spread_factor).
+        # The median itself is untouched; only the band width changes.
+        # Note: the factor uses the RAW hour-1 print, not the damped
+        # effective size -- the band must reflect the actual launch scale,
+        # and the floor caps how far the extrapolation may narrow it.
+        s = spread_factor(p1, h)
+        med = log_qs[2]
+        log_qs = [med + s * (q - med) for q in log_qs]
         quantiles = []
         prev = 0.0
         for log_q in log_qs:
