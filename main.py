@@ -28,19 +28,20 @@ For each hour h = 2..24, over the training family, fit in log space
     ln(v_h / v_1) = a_h + b_h * (ln(v_1) - mean ln(v_1))
 
 i.e. the log-ratio of hour h to hour 1, regressed on launch size. The slope
-is shrunk toward 0 by n/(n+5). The target's log-size is clamped to the
+is shrunk toward 0 by n/(n+3). The target's log-size is clamped to the
 training range so a record-size launch never extrapolates past the data.
 The median forecast is p1 * exp(a_h + b_h * (clamped ln p1 - mean)), and
-the spread is the within-family residual standard deviation (floored at
-0.12 log units), giving q_tau = p1 * exp(median + z_tau * sd) with the
-standard-normal quantiles (-1.645, -0.674, 0, 0.674, 1.645).
+the five quantiles are the EMPIRICAL quantiles of the fit's residuals
+(5/25/50/75/95% of the sorted residuals, linear interpolation): the
+residuals are skewed and heavy-tailed, so a normal spread misprices the
+tails — the empirical spread is what the backtest rewards (see METHOD.md).
 
 Backtest (leave-one-out over the 37 comparable launches in the kit,
 pinball loss on the log scale, lower is better):
     house baseline (persistence)      0.930
-    this model                        0.471
-    this model, rolling launches only 0.270 (baseline 0.357 there)
-Coverage of the 90% band in backtest: 0.85; typical median miss ~133%
+    this model                        0.464
+    this model, rolling launches only 0.264 (baseline 0.357 there)
+Coverage of the 90% band in backtest: 0.80; typical median miss ~129%
 (the launch-day curve is genuinely hard to pin down hour by hour).
 
 The program is deterministic (sorted inputs, no randomness, no clock, no
@@ -67,10 +68,9 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
-SHRINK_K = 5          # slope shrinkage n / (n + SHRINK_K)
+SHRINK_K = 3          # slope shrinkage n / (n + SHRINK_K)
 MIN_GROUP = 8         # need at least this many training launches, else fall back
 MIN_HOUR_N = 8        # need at least this many launches with hour h, else fallback
-SD_FLOOR = 0.12       # minimum log-spread per hour
 SD_FALLBACK = 0.45    # spread when an hour has too little data
 BASE_SIGMA = 0.15     # house baseline spread, used only as a last resort
 
@@ -142,11 +142,6 @@ def mean(values):
     return sum(values) / len(values)
 
 
-def pstdev(values):
-    m = mean(values)
-    return math.sqrt(sum((v - m) ** 2 for v in values) / len(values))
-
-
 def median(values):
     ordered = sorted(values)
     n = len(ordered)
@@ -156,9 +151,23 @@ def median(values):
     return (ordered[mid - 1] + ordered[mid]) / 2.0
 
 
+def empirical_quantile(sorted_values, tau):
+    """Linear-interpolation quantile of a sorted list."""
+    n = len(sorted_values)
+    if n == 1:
+        return sorted_values[0]
+    pos = tau * (n - 1)
+    lo = int(math.floor(pos))
+    hi = min(lo + 1, n - 1)
+    frac = pos - lo
+    return sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac
+
+
 def fit_hour(pairs, log_p1):
     """Fit ln(v_h / v_1) ~ a + b * (ln(v_1) - mean ln(v_1)) over `pairs`
-    [(ln v1, ln(v_h / v1))]. Returns (median_log_ratio, sd)."""
+    [(ln v1, ln(v_h / v1))]. Returns (median_log_ratio, sorted_residuals):
+    the residuals of the shrunk-slope fit, sorted, so the caller can take
+    empirical quantiles instead of assuming a normal spread."""
     xs = [x for x, _ in pairs]
     ys = [y for _, y in pairs]
     mx = mean(xs)
@@ -169,9 +178,8 @@ def fit_hour(pairs, log_p1):
         slope = sum((x - mx) * (y - my) for x, y in pairs) / sxx
     slope *= len(pairs) / (len(pairs) + SHRINK_K)
     median_log = my + slope * (log_p1 - mx)
-    resid = [y - (my + slope * (x - mx)) for x, y in pairs]
-    sd = max(SD_FLOOR, pstdev(resid)) if len(resid) >= 2 else SD_FALLBACK
-    return median_log, sd
+    resid = sorted(y - (my + slope * (x - mx)) for x, y in pairs)
+    return median_log, resid
 
 
 def forecast_case(case, name):
@@ -180,9 +188,15 @@ def forecast_case(case, name):
     known = case.get("known") or []
     first = next((k for k in known if k.get("hour") == 1), None)
     if first is None:
-        # No hour-1 print: fall back to the last hourly history point, else 1.
+        # No hour-1 print: fall back to the last hourly history point with
+        # a positive viewers value, else 1.
         hourly = case.get("history_hourly") or []
-        p1 = float(hourly[-1]["viewers"]) if hourly else 1.0
+        p1 = 1.0
+        for row in reversed(hourly):
+            viewers = row.get("viewers")
+            if viewers is not None and float(viewers) > 0:
+                p1 = float(viewers)
+                break
     else:
         p1 = float(first.get("viewers") or 0)
     p1 = max(1.0, p1)
@@ -209,17 +223,19 @@ def forecast_case(case, name):
             if h in curve:
                 pairs.append((math.log(curve[1]), math.log(curve[h] / curve[1])))
         if len(pairs) >= MIN_HOUR_N:
-            med_log, sd = fit_hour(pairs, log_p1)
+            med_log, resid = fit_hour(pairs, log_p1)
+            # Empirical quantiles of the fit residuals (see fit_hour).
+            log_qs = [med_log + empirical_quantile(resid, tau) for tau in LEVELS]
         elif pairs:
             med_log = median([y for _, y in pairs])
-            sd = SD_FALLBACK
+            log_qs = [med_log + z * SD_FALLBACK for z in Z]
         else:
             # No training data for this hour: house baseline (persistence).
-            med_log, sd = 0.0, BASE_SIGMA * math.sqrt(h - 1)
+            log_qs = [z * BASE_SIGMA * math.sqrt(h - 1) for z in Z]
         quantiles = []
         prev = 0.0
-        for z in Z:
-            q = p1 * math.exp(med_log + z * sd)
+        for log_q in log_qs:
+            q = p1 * math.exp(log_q)
             q = min(max(q, 1.0), 1e9)
             q = round2(q)
             if q < prev:  # keep the row non-decreasing after rounding

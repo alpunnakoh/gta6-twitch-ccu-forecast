@@ -41,18 +41,27 @@ For each hour h = 2..24, over the training family, fit in log space:
     ln(v_h / v_1) = a_h + b_h * (ln(v_1) - mean ln(v_1))
 
 The log-ratio of hour h to hour 1, regressed on launch size. The slope is
-shrunk toward 0 by n/(n+5). The target's log-size is clamped to the
+shrunk toward 0 by n/(n+3). The target's log-size is clamped to the
 training range, so a record-size launch never extrapolates past the data.
 
 - Median: `p1 * exp(a_h + b_h * (clamped ln p1 - mean))`
-- Spread: within-family residual standard deviation per hour (floored at
-  0.12 log units); `q_tau = p1 * exp(median + z_tau * sd)` with
-  z = (-1.645, -0.674, 0, 0.674, 1.645).
+- Spread: the five quantiles are the **empirical quantiles of the fit's
+  residuals** (5/25/50/75/95% of the sorted residuals, linear
+  interpolation). The residuals are skewed and heavy-tailed, so a normal
+  spread misprices the tails — v1.1 replaced the normal spread (residual
+  sd floored at 0.12) with empirical quantiles, and the shrink constant
+  with it (k=5 → k=3). Backtest: total 0.471 → **0.464**, rolling launches
+  0.270 → **0.264**, console-rolling 0.255 → **0.238** (see table below).
+  The near-tied alternative (k=2 + empirical, total 0.458) was NOT
+  adopted: it wins on total but loses on the rolling subset, and GTA VI
+  is a rolling launch.
 
 Fallbacks: an hour with fewer than 8 training launches uses the median
 ratio of the launches that have it (sd 0.45); with no training launches at
 all for an hour, the house baseline (persistence). If the family itself has
-fewer than 8 launches, all comparables are used.
+fewer than 8 launches, all comparables are used. If hour 1 has no print,
+the last hourly history point with a positive viewers value is used (v1
+crashed on a `None` viewers value there — fixed in v1.1).
 
 What the program deliberately does NOT use: the case's minute-by-minute
 `history` and `streams`/`categories_hourly`. Hour 1's print already encodes
@@ -67,17 +76,20 @@ backtest: adding channels-per-viewer features did not help — not shipped.)
 | house baseline (persistence) | 0.930 | 0.357 | 0.301 |
 | median ratio + normal spread (all) | 0.795 | — | — |
 | size-adjusted, all launches | 0.461 | 0.284 | 0.268 |
-| **this model (size-adj, already-unlocked family)** | **0.471** | **0.270** | **0.255** |
+| v1.0 (size-adj, already-unlocked family, k=5, normal spread) | 0.471 | 0.270 | 0.255 |
+| **v1.1 (this model: k=3, empirical residual quantiles)** | **0.464** | **0.264** | **0.238** |
 
-Coverage of the 90% band: 0.85. Typical median miss: ~133% — the
+Coverage of the 90% band: 0.80 (v1.0: 0.85 — the empirical spread is
+narrower in the tails, which the pinball loss rewards when the median is
+well placed). Typical median miss: ~129% (v1.0: ~133%) — the
 launch-day curve is genuinely hard to pin down hour by hour, and the loss
 rewards an honest spread rather than a narrow guess.
 
-Predicted GTA VI median shape (hour-1 print 300k-1M): dip to ~0.7x at
-hours 4 and 10-11, rise to a peak of ~1.3-1.5x at hours 20-21, ~1.1-1.3x
-at hour 24. The shape is nearly size-invariant above ~365k viewers
-because of the clamp — a deliberate guard against extrapolating the
-size slope past the data.
+Predicted GTA VI median shape (hour-1 print 300k-1M, measured with v1.1
+on the practice cases): dip to ~0.76x at hour 4 and ~0.5x at hours 10-12,
+rise to a peak of ~0.8-1.0x at hours 20-22, ~0.6-0.8x at hour 24. The
+shape flattens with size because of the clamp — a deliberate guard against
+extrapolating the size slope past the data.
 
 ## Risks
 
