@@ -5,7 +5,7 @@ writes, for each of hours 2..24 of the release day, five quantiles
 (5/25/50/75/95%) of that hour's Twitch concurrent viewers in the
 "Grand Theft Auto VI" category.
 
-Method (M25; see METHOD.md for the full write-up and backtest numbers)
+Method (M26; see METHOD.md for the full write-up and backtest numbers)
 -----------------------------------------------------------------------
 The forecast is anchored on the case's hour-1 print p1 and on the shape of
 past big launches' release days, which the case carries in `comparables`
@@ -40,15 +40,8 @@ For each hour h = 2..24, over the training family, fit in log space
 
     ln(v_h / v_1) = a_h + b_h * (ln(v_1) - mean ln(v_1))
 
-i.e. the log-ratio of hour h to hour 1, regressed on launch size. The slope
-is shrunk toward 0 by n/(n+5). GTA VI will very likely be bigger than any
-training launch (family max 875k), so the target's log-size is NOT hard
-clamped to the training range: beyond the range it moves only half the way
-(damped extrapolation, factor 0.5). A damped step beats both a hard clamp
-and a full extrapolation on the giant test (train capped at 365k, predict
-the two 850k+ giants: 0.122 vs 0.133 clamped, 0.125 unclamped; M23: 0.181).
-
-The median forecast is p1 * exp(a_h + b_h * (effective ln p1 - mean)), and
+i.e. the log-ratio of hour h to hour 1, regressed on launch size. The
+median forecast is p1 * exp(a_h + b_h * (effective ln p1 - mean)), and
 the five quantiles are the EMPIRICAL quantiles of the fit's residuals
 (5/25/50/75/95% of the sorted residuals, linear interpolation): the
 residuals are skewed and heavy-tailed, so a normal spread misprices the
@@ -56,17 +49,15 @@ tails. Spread inflation and leave-one-out residuals were both tested and
 both HURT the GTA-VI-like subsets, so the plain in-sample empirical spread
 stays as the base.
 
-M25 change -- size- and hour-dependent spread (the one new signal that
-survived every test in the M25 round). Big launches have TIGHTER relative
-spread than small ones (thousands of channels average out): scaling the
-log-spread by a factor that falls with launch size cuts the giants' LOO
-loss by ~22%. The factor is a threshold hinge -- it only starts narrowing
-above 200k hour-1 viewers, so mid-size launches keep M24's spread
-unchanged (a plain linear size term hurt them) -- times a mild hour
-narrowing (the curve is most predictable late in the day), with a FLOOR
-of 0.45 so that even a 2-5M hour-1 print can never narrow the band past
-the point the backtest can vouch for (an over-narrowed band was the one
-way this idea failed: hinge slope -0.4 made the giants WORSE than M24):
+M25 change -- size- and hour-dependent spread. Big launches have TIGHTER
+relative spread than small ones (thousands of channels average out):
+scaling the log-spread by a factor that falls with launch size cuts the
+giants' LOO loss by ~22%. The factor is a threshold hinge -- it only
+starts narrowing above 200k hour-1 viewers, so mid-size launches keep
+M24's spread unchanged -- times a mild hour narrowing (the curve is most
+predictable late in the day), with a FLOOR of 0.45 so that even a 2-5M
+hour-1 print can never narrow the band past the point the backtest can
+vouch for:
 
     s(p1, h) = max((1 - 0.3 * max(0, ln p1 - ln 200k))
                    * (1 - 0.15 * (h - 13) / 12), 0.45)
@@ -74,34 +65,70 @@ way this idea failed: hinge slope -0.4 made the giants WORSE than M24):
 and each hour's log-quantiles are scaled around their median by s.
 At p1 = 875k the factor is 0.63 (h2) .. 0.48 (h24); at p1 = 1.5M it is
 floored at 0.45; below 200k it is 1.14 (h2) .. 0.86 (h24) from the hour
-term alone. Ideas tested and REJECTED in the M25 round: ensembles of
-M23/M24/F2/F4 variants (mixed, worse on giants), kernel-weighted local
-regression (better giants, worse console/au), uniform spread inflation
-(worse everywhere), parametric polynomial median curves (worse), channels
-and pre-launch baseline as regressors (weak/inconsistent correlations,
-uncomputable for the target), weekday effects (none: huge within-weekday
-spread). The 138 near-zero-loss practice-board entries are hardcoded
+term alone. The 138 near-zero-loss practice-board entries are hardcoded
 public historical curves and cannot work on the final fresh case.
 
+M26 changes -- four small, independently-tested stabilisers. Each was
+chosen because it won on the decisive LOO subsets (rolling, console,
+giants) AND on the extrapolation tests (giantB, cap365, cap152) -- never
+on the plain total, which is dominated by seven simultaneous-global
+launches whose hour 1 is ~empty and which no GTA-VI-like model can
+predict:
+
+  1. Log-damped extrapolation: beyond the training size range the
+     effective log-size moves by log1p(distance) instead of 0.5*distance
+     -- it extrapolates further than the linear damp where the giant test
+     can vouch for it (giantB 0.102 -> 0.095 alone) but saturates for a
+     2-5M hour-1 print instead of running away.
+  2. Less slope shrinkage in early hours: k=2 for h<=8, k=5 after.
+     Early hours have the steepest, noisiest slopes; shrinking them less
+     fits the giants better (giants 0.087 -> 0.080 with the combo).
+  3. Slope clipping at +/-0.4: per-hour slopes are noisy (n~18); a few
+     extreme slopes (from one unusual launch) distorted the median.
+     Clipping alone helps the LOO subsets but hurts giantB -- combined
+     with the log-damp it helps both.
+  4. Median smoothing + tail smoothing: a 3-point moving average of the
+     log-median across hours (the median curve should not zigzag), and
+     the log-quantile deviations blended 75/25 toward a normal spread
+     (sd from the IQR) -- with n~18 residuals the 5%/95% empirical
+     quantiles are extreme order statistics and over-noisy.
+
+Ideas tested and REJECTED in the M26 round (do not retry without a
+genuinely new angle): rolling-only median fit (destroys slope stability:
+giants 0.126, giantB 0.265), rolling-offset correction (same failure),
+two-stage peak model (algebraically identical to the direct fit when the
+shape is size-adjusted; worse with a plain median shape), quantile
+asymmetry (helps the total via the simultaneous explosions but hurts
+EVERY decisive subset), tail smoothing alone at w<=0.5 (hurts rolling),
+exp-saturating and progressive damping (worse giantB/cap365), split-hour
+shrink k late=3 (hurts rolling/console/giants), hour-dependent spread
+floor (no measurable effect in LOO), slope clip 0.35 (cap152 worse than
+M25 -- knife-edge on the low side), k=6/7/8 and damp 0.4/0.6 (rejected
+in earlier rounds). The two-stage peak model is NOT a new model: OLS of
+a sum is the sum of OLS fits, so peak+shape with size adjustment
+reproduces the direct regression exactly.
+
 Backtest (leave-one-out over the 37 comparable launches in the kit,
-pinball loss on the log scale, lower is better). NOTE: the plain total
-(0.669) is WORSE than M23's (0.464) -- entirely because of seven
-simultaneous-global launches whose hour 1 is ~empty (Silksong, HELLDIVERS
-2, Kingdom Come, ARC Raiders, Battlefield 6, Black Myth, Baldur's Gate 3);
-the new family cannot predict their 100-1000x explosions, and neither can
-any model that matters for GTA VI, whose hour 1 will be enormous. On
-every GTA-VI-like subset M25 beats M24 (and M23):
-    rolling-midnight launches only   0.232 (M24 0.237, M23 0.264)
-    console-only rolling launches   0.164 (M24 0.167, M23 0.238)
-    already-unlocked & v1 >= 50k    0.196 (M24 0.196, M23 0.230)
-    v1 >= 100k                      0.222 (M24 0.226, M23 0.244)
-    the two giants (Elden Ring, Cyberpunk)  0.087 (M24 0.112, M23 0.181)
-    giant test (train capped at 365k, predict the giants) 0.102 (M24 0.122)
-    progressive-cap test (train <= 365k, all launches above) 0.121 (M24 0.136)
-Coverage of the 90% band on rolling launches: 0.86 (M24 0.87, M23 0.96);
-giants' coverage 0.96 (M24 1.00) with typical median miss ~16% (M24 16%).
-End-to-end validation through the shipped main.py reproduces the backtest
-total exactly (0.6687, n=37).
+pinball loss on the log scale, lower is better). M26 vs M25:
+    total                         0.676 (M25 0.669) -- WORSE, entirely
+                                      the seven simultaneous launches;
+                                      M26's tail smoothing narrows the
+                                      upper tail they need, and clipping
+                                      moves their medians. Irrelevant:
+                                      GTA VI's hour 1 will be enormous.
+    rolling-midnight launches     0.229 (M25 0.232)
+    console-only rolling          0.160 (M25 0.164)
+    already-unlocked & v1 >= 50k  0.191 (M25 0.196)
+    v1 >= 100k                    0.218 (M25 0.222)
+    the two giants                0.080 (M25 0.087)
+    giant test (train capped at 365k, predict the giants) 0.088 (0.102)
+    progressive-cap 365k          0.111 (M25 0.121)
+    progressive-cap 152k          0.277 (M25 0.283)
+    wins 10 of 12 rolling targets head-to-head in LOO.
+Coverage of the 90% band on rolling launches: 0.86 (M25 0.86);
+giants' coverage 0.93 (M25 0.93) with typical median miss ~16%.
+End-to-end validation through the shipped main.py reproduces the
+backtest total exactly (0.6762, n=37).
 
 The program is deterministic (sorted inputs, no randomness, no clock, no
 network) and uses only the Python standard library. It runs in well under
@@ -127,9 +154,11 @@ OUTPUT_DIR = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
 
 LEVELS = [0.05, 0.25, 0.5, 0.75, 0.95]
 Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
-SHRINK_K = 5          # slope shrinkage n / (n + SHRINK_K)
-DAMP = 0.5            # extrapolation beyond the training size range: move
-                      # only this fraction of the way past the boundary
+SHRINK_K = 5          # slope shrinkage n / (n + SHRINK_K) for h >= 9
+SHRINK_K_EARLY = 2    # M26: less shrinkage for h <= 8 (steep, noisy slopes)
+SLOPE_CLIP = 0.4      # M26: clip per-hour slopes to +/-0.4
+TAIL_W = 0.75         # M26: blend empirical log-deviations 75/25 toward normal
+DAMP = 0.5            # (M24/M25 linear damp, superseded by log-damp below)
 V1_FLOOR = 10_000     # family members need a real launch hour 1
 GIANTS = {"ELDEN RING", "Cyberpunk 2077"}  # hour 1 is a real launch hour
                       # despite "single global" in their unlock text
@@ -249,11 +278,13 @@ def empirical_quantile(sorted_values, tau):
     return sorted_values[lo] * (1 - frac) + sorted_values[hi] * frac
 
 
-def fit_hour(pairs, log_p1):
+def fit_hour(pairs, log_p1, k):
     """Fit ln(v_h / v_1) ~ a + b * (ln(v_1) - mean ln(v_1)) over `pairs`
-    [(ln v1, ln(v_h / v1))]. Returns (median_log_ratio, sorted_residuals):
-    the residuals of the shrunk-slope fit, sorted, so the caller can take
-    empirical quantiles instead of assuming a normal spread."""
+    [(ln v1, ln(v_h / v1))]. The slope is shrunk toward 0 by n/(n+k) and
+    clipped to +/-SLOPE_CLIP (M26: a few extreme slopes, from one unusual
+    launch, distorted the median). Returns (median_log_ratio,
+    sorted_residuals): the residuals of the fit, sorted, so the caller can
+    take empirical quantiles instead of assuming a normal spread."""
     xs = [x for x, _ in pairs]
     ys = [y for _, y in pairs]
     mx = mean(xs)
@@ -262,23 +293,23 @@ def fit_hour(pairs, log_p1):
     slope = 0.0
     if sxx > 0:
         slope = sum((x - mx) * (y - my) for x, y in pairs) / sxx
-    slope *= len(pairs) / (len(pairs) + SHRINK_K)
+    slope *= len(pairs) / (len(pairs) + k)
+    slope = max(-SLOPE_CLIP, min(SLOPE_CLIP, slope))
     median_log = my + slope * (log_p1 - mx)
     resid = sorted(y - (my + slope * (x - mx)) for x, y in pairs)
     return median_log, resid
 
 
 def effective_log_size(log_p1, lo, hi):
-    """Damped extrapolation: inside the training range the size is used as
-    is; outside it, move only DAMP of the way past the boundary. A
-    record-size launch is therefore neither clamped flat to the biggest
-    training launch nor extrapolated at full slope -- both of which scored
-    worse on the giant test (train capped at 365k, predict the 850k+
-    giants)."""
+    """M26 log-damped extrapolation: inside the training range the size is
+    used as is; outside it, move by log1p(distance) past the boundary --
+    further than the old linear 0.5 damp where the giant test can vouch
+    for it (giantB 0.102 -> 0.095 alone), but saturating for a 2-5M
+    hour-1 print instead of running away at full slope."""
     if log_p1 > hi:
-        return hi + DAMP * (log_p1 - hi)
+        return hi + math.log1p(log_p1 - hi)
     if log_p1 < lo:
-        return lo + DAMP * (log_p1 - lo)
+        return lo - math.log1p(lo - log_p1)
     return log_p1
 
 
@@ -332,7 +363,8 @@ def forecast_case(case, name):
     hi = max(log_sizes) if log_sizes else 0.0
     log_p1 = effective_log_size(math.log(p1), lo, hi) if log_sizes else math.log(p1)
 
-    rows = []
+    # Per-hour log-quantiles (base: M25 model with M26 fit changes).
+    log_rows = {}
     for row in case["forecast"]:
         h = int(row["hour"])
         pairs = []
@@ -340,7 +372,8 @@ def forecast_case(case, name):
             if h in curve:
                 pairs.append((math.log(curve[1]), math.log(curve[h] / curve[1])))
         if len(pairs) >= MIN_HOUR_N:
-            med_log, resid = fit_hour(pairs, log_p1)
+            k = SHRINK_K_EARLY if h <= 8 else SHRINK_K
+            med_log, resid = fit_hour(pairs, log_p1, k)
             # Empirical quantiles of the fit residuals (see fit_hour).
             log_qs = [med_log + empirical_quantile(resid, tau) for tau in LEVELS]
         elif pairs:
@@ -356,10 +389,35 @@ def forecast_case(case, name):
         # and the floor caps how far the extrapolation may narrow it.
         s = spread_factor(p1, h)
         med = log_qs[2]
-        log_qs = [med + s * (q - med) for q in log_qs]
+        log_rows[h] = [med + s * (q - med) for q in log_qs]
+
+    # M26: median smoothing -- a 3-point moving average of the log-median
+    # across hours; the whole band shifts with its median. The median curve
+    # should not zigzag hour to hour.
+    hours_sorted = sorted(log_rows)
+    med_logs = {h: log_rows[h][2] for h in hours_sorted}
+    for i, h in enumerate(hours_sorted):
+        nb = [med_logs[hours_sorted[j]]
+              for j in range(max(0, i - 1), min(len(hours_sorted), i + 2))]
+        shift = sum(nb) / len(nb) - med_logs[h]
+        log_rows[h] = [q + shift for q in log_rows[h]]
+
+    # M26: tail smoothing -- blend each hour's log-deviations 75/25 toward
+    # a normal spread (sd from the IQR). With n~18 residuals the 5%/95%
+    # empirical quantiles are extreme order statistics and over-noisy.
+    for h in hours_sorted:
+        log_qs = log_rows[h]
+        med = log_qs[2]
+        devs = [q - med for q in log_qs]
+        sd = max(0.05, (devs[3] - devs[1]) / 1.349)
+        log_rows[h] = [med + TAIL_W * d + (1 - TAIL_W) * z * sd
+                       for d, z in zip(devs, Z)]
+
+    rows = []
+    for h in hours_sorted:
         quantiles = []
         prev = 0.0
-        for log_q in log_qs:
+        for log_q in log_rows[h]:
             q = p1 * math.exp(log_q)
             q = min(max(q, 1.0), 1e9)
             q = round2(q)

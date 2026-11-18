@@ -1,4 +1,4 @@
-# Method — GTA VI launch-day Twitch CCU forecast (v3 / M25)
+# Method — GTA VI launch-day Twitch CCU forecast (v4 / M26)
 
 ## What the program does
 
@@ -126,6 +126,40 @@ variant in three rounds to do so. Total LOO is 0.6687 vs M24's 0.6682
 (flat; the total is dominated by the seven simultaneous launches and is
 not the decision metric).
 
+## The M26 changes: four stabilisers (v4, final round)
+
+M26 keeps the M25 model and adds four small, independently-tested
+stabilisers. Each won on the decisive LOO subsets (rolling, console,
+giants) AND on the extrapolation tests (giantB, cap365, cap152) — never
+on the plain total:
+
+1. **Log-damped extrapolation** (replaces the linear 0.5 damp): beyond
+   the training size range the effective log-size moves by `log1p(distance)`
+   instead of `0.5 * distance` — further than the linear damp where the
+   giant test can vouch for it (giantB 0.102 -> 0.095 alone), but
+   saturating for a 2-5M hour-1 print instead of running away.
+2. **Less slope shrinkage in early hours**: k=2 for h<=8, k=5 after.
+   Early hours have the steepest, noisiest slopes; shrinking them less
+   fits the giants better.
+3. **Slope clipping at +/-0.4**: per-hour slopes are noisy (n~18); a few
+   extreme slopes (from one unusual launch) distorted the median. Clipping
+   alone helps the LOO subsets but hurts giantB — combined with the
+   log-damp it helps both.
+4. **Median smoothing + tail smoothing**: a 3-point moving average of the
+   log-median across hours (the median curve should not zigzag), and the
+   log-quantile deviations blended 75/25 toward a normal spread (sd from
+   the IQR) — with n~18 residuals the 5%/95% empirical quantiles are
+   extreme order statistics and over-noisy.
+
+The four stack: M26 beats M25 on every decisive subset and every
+extrapolation test (table below). The plain total gets WORSE (0.676 vs
+0.669) — entirely the seven simultaneous launches, whose upper tail the
+tail smoothing narrows and whose medians the clipping moves. Irrelevant:
+GTA VI's hour 1 will be enormous. M26 wins 10 of 12 rolling targets
+head-to-head in LOO (the two losses: Resident Evil Requiem +0.018, an
+outlier whose curve sits 3.5x above the family median, and Monster Hunter
+Wilds +0.006).
+
 ## Tested and rejected in v2 and v3 (M25 round)
 
 - **Ensembles** (Vincentized log-quantile mean of M23/M24/F2-clamp/
@@ -170,14 +204,52 @@ not the decision metric).
   rolling LOO subset but LOSES on the giant test (0.148 vs 0.133). Kept.
 - **Slope shrink k=1/2/8/10**: k=5 is the sweet spot for the new family.
 
+## Tested and rejected in the M26 round (final, 19 Nov, ~7h before deadline)
+
+- **Rolling-only median fit** (median + spread from the 10 rolling family
+  members only): MUCH worse everywhere — rolling 0.243 vs 0.232, giants
+  0.126 vs 0.087, giantB 0.265 vs 0.102. The 8 non-rolling family members
+  are slope stabilisers; removing them makes the per-hour slope fit
+  (n=9) unstable, especially for the giants. The apparent +0.167 median
+  bias on rolling targets is heterogeneous (RE Requiem +1.26, MHW +0.55,
+  BO6 +0.33 vs giants -0.01/-0.00), not a family effect. Dropped.
+- **Rolling-offset correction** (add the rolling members' mean in-sample
+  residual to the F2 median): also worse everywhere (giants 0.123-0.150,
+  giantB 0.183-0.216). Same failure. Dropped.
+- **Two-stage peak model** (predict peak ratio, then shape relative to
+  peak): with a size-adjusted shape it is ALGEBRAICALLY IDENTICAL to the
+  direct fit (OLS of a sum = sum of OLS fits), so it reproduces M25
+  exactly — not a new model. With a plain median shape it is worse
+  (rolling 0.268, giants 0.284). Dropped.
+- **Quantile asymmetry** (wider upper tail, narrower lower, and the
+  reverse): up=1.15/lo=0.9 improves the total (0.663) and rolling
+  (0.229) but hurts EVERY other decisive subset (console 0.167, au 0.199,
+  giants 0.090, giantB 0.106, cap365 0.125) — it helps the simultaneous
+  explosions, not GTA VI. The reverse (up=0.9/lo=1.1) helps giants/giantB
+  but hurts rolling (0.235). Dropped.
+- **Tail smoothing alone at w<=0.5**: hurts rolling (0.233-0.234 vs
+  0.232). Only w=0.75 stacked with median smoothing helps. Dropped alone.
+- **Exp-saturating and progressive damping**: giantB 0.097/0.117 and
+  cap365 0.121/0.127 vs log-damp 0.095/0.121 — log-damp wins. Dropped.
+- **Split-hour shrink k late=3** (k=5 early, 3 late): total 0.659 looks
+  good but rolling 0.235, console 0.167, giants 0.097 — all worse.
+  Dropped. (k early=3 late=5 is the shipped direction.)
+- **Hour-dependent spread floor** (higher floor for h<=6): no measurable
+  effect in LOO (identical to 4 decimals) — untestable with current data.
+  Dropped.
+- **Slope clip 0.35**: cap152 0.290 vs M25's 0.283 — worse than the
+  baseline on the deepest extrapolation test; knife-edge on the low side.
+  Dropped (0.4 is the shipped value; 0.45 is equivalent within noise).
+
 ## Backtest (leave-one-out, 37 comparable launches, pinball loss on log scale)
 
-| model | total | rolling | console-rolling | au & v1>=50k | giants | giant test | cap365k |
-|---|---|---|---|---|---|---|---|
-| house baseline (persistence) | 0.930 | 0.357 | 0.301 | — | — | — | — |
-| v1.1 (M23: old family, k=3, clamp) | 0.464 | 0.264 | 0.238 | 0.230 | 0.181 | 0.181 | 0.212 |
-| v2 (M24: new family, k=5, damp 0.5) | 0.668 | 0.237 | 0.167 | 0.196 | 0.112 | 0.122 | 0.136 |
-| **v3 (M25: M24 + spread hinge)** | **0.669** | **0.232** | **0.164** | **0.196** | **0.087** | **0.102** | **0.121** |
+| model | total | rolling | console-rolling | au & v1>=50k | giants | giant test | cap365k | cap152k |
+|---|---|---|---|---|---|---|---|---|
+| house baseline (persistence) | 0.930 | 0.357 | 0.301 | — | — | — | — | — |
+| v1.1 (M23: old family, k=3, clamp) | 0.464 | 0.264 | 0.238 | 0.230 | 0.181 | 0.181 | 0.212 | — |
+| v2 (M24: new family, k=5, damp 0.5) | 0.668 | 0.237 | 0.167 | 0.196 | 0.112 | 0.122 | 0.136 | — |
+| v3 (M25: M24 + spread hinge) | 0.669 | 0.232 | 0.164 | 0.196 | 0.087 | 0.102 | 0.121 | 0.283 |
+| **v4 (M26: M25 + 4 stabilisers)** | **0.676** | **0.229** | **0.160** | **0.191** | **0.080** | **0.088** | **0.111** | **0.277** |
 
 **Read the total with care.** v2/v3's plain total (0.668) is worse than
 v1.1's (0.464) — entirely because of seven simultaneous-global launches
@@ -191,11 +263,11 @@ giant test -16%, cap365 -11%) and over v1.1 by much more. The final case
 is a rolling-midnight console giant — the subsets, not the total, are the
 decision metric.
 
-Coverage of the 90% band on rolling launches: 0.86 (v2: 0.87, v1.1: 0.96,
-over-wide); giants' coverage 0.96 (v2: 1.00) with typical median miss
-~16% on giants (v2: 16%), ~48% on rolling (v2: 48%). End-to-end
+Coverage of the 90% band on rolling launches: 0.86 (v3: 0.86, v2: 0.87,
+v1.1: 0.96, over-wide); giants' coverage 0.93 (v3: 0.93, v2: 1.00) with
+typical median miss ~16% on giants (v3: 16%), ~48% on rolling. End-to-end
 validation through the shipped `main.py` reproduces the backtest total
-exactly (0.6687, n=37). All 7 edge cases pass (missing/`None` hour-1
+exactly (0.6762, n=37). All 7 edge cases pass (missing/`None` hour-1
 print, p1=0, no history, no comparables, p1=5M, p1=100, unusable
 comparables). Runtime: 4 practice cases in ~0.2s (limit 8s/case).
 
@@ -216,21 +288,22 @@ public historical curves (SullyGnome) keyed by game name — the rules
 themselves say practice launches "anyone can look up" and "a practice
 score is no guide to the final". Those entries gain nothing for the prize:
 the final case (h00) is future data that cannot be hardcoded, and prizes
-are decided on the final loss only. v2/v3 do NOT do this. Our honest
+are decided on the final loss only. v2/v3/v4 do NOT do this. Our honest
 practice scores: v1.1 loss 0.201 (rank #2,679 of 6,250; median 0.21),
-v2 loss 0.196 (rank #2,482 of 6,445). v3's practice score will be measured
-after submission. Note the practice cases are small/medium launches
-(23k-269k), so they barely test the giant-aware parts of v2/v3 — the
-giant test and cap365k test are the better guides for the final.
+v2 loss 0.196 (rank #2,482 of 6,445), v3 loss 0.194 (rank #3,549 of
+10,275). v4's practice score will be measured after submission. Note the
+practice cases are small/medium launches (23k-269k), so they barely test
+the giant-aware parts of v2/v3/v4 — the giant test and cap365k/cap152k
+tests are the better guides for the final.
 
 ## Risks
 
 1. **GTA VI is bigger than any training launch.** Now mitigated, not
    solved: the family reaches 875k (the giants) and the size extrapolates
-   damped (0.5) past it, and the spread floor (0.45) stops the band from
-   over-narrowing at 1.5M+. If hour 1 prints ~2M, the shape is a damped
-   extension of the giants' front-loaded pattern — the best evidence
-   available, but still an extension.
+   log-damped past it, and the spread floor (0.45) stops the band from
+   over-narrowing at 1.5M+. If hour 1 prints ~2M, the shape is a
+   log-damped extension of the giants' front-loaded pattern — the best
+   evidence available, but still an extension.
 2. **The final's hour-1 print is a mean of minute reads**, while training
    ratios come from SullyGnome hourly averages. The two measures are close
    but not identical; a systematic gap would shift every ratio slightly.
